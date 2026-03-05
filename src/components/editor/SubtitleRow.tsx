@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, memo } from 'react'
 import type { Segment } from '../../types/subtitle'
 import { clsx } from 'clsx'
 
@@ -18,7 +18,7 @@ interface SubtitleRowProps {
   onUpdate: (id: string, patch: Partial<Segment>) => void
 }
 
-export default function SubtitleRow({
+function SubtitleRow({
   index,
   segment,
   isSelected,
@@ -103,3 +103,5 @@ export default function SubtitleRow({
     </div>
   )
 }
+
+export default memo(SubtitleRow)
