@@ -12,12 +12,12 @@
   "scripts": {
     "dev": "vite",
     "build:frontend": "vite build",
-    "build:backend": "node scripts/build-backend.js",
+    "build:backend": "node scripts/build-backend.cjs",
     "build:dist": "electron-builder",
     "build": "npm run build:backend && npm run build:frontend && npm run build:dist",
     "preview": "vite preview",
-    "setup:python": "node scripts/setup-python.js",
-    "setup:ffmpeg": "node scripts/download-ffmpeg.js",
+    "setup:python": "node scripts/setup-python.cjs",
+    "setup:ffmpeg": "node scripts/download-ffmpeg.cjs",
     "setup:all": "npm run setup:python && npm run setup:ffmpeg",
     "test": "vitest run",
     "test:watch": "vitest"

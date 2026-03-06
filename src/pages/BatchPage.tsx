@@ -102,7 +102,7 @@ export default function BatchPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="w-full px-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-white mb-2">Batch Processing</h2>
         <p className="text-slate-400">

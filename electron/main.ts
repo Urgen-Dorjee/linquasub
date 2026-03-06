@@ -1,8 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import { PythonManager } from './python-manager'
 import { FFmpegManager } from './ffmpeg-manager'
 import { setupAutoUpdater } from './auto-updater'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 const BACKEND_PORT = 8321
 
@@ -38,10 +42,15 @@ function createWindow() {
   }
 }
 
+function getWindow(): BrowserWindow | null {
+  return mainWindow || BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null
+}
+
 function registerIpcHandlers() {
   ipcMain.handle('dialog:openVideo', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       properties: ['openFile'],
       filters: [
         { name: 'Video Files', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'] },
@@ -52,8 +61,9 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('dialog:openSubtitle', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       properties: ['openFile'],
       filters: [
         { name: 'Subtitle Files', extensions: ['srt', 'vtt', 'ass', 'ssa'] },
@@ -64,8 +74,9 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('dialog:openVideoMultiple', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       properties: ['openFile', 'multiSelections'],
       filters: [
         { name: 'Video Files', extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'] },
@@ -76,16 +87,18 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('dialog:openDir', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory'],
     })
     return result.canceled ? null : result.filePaths[0]
   })
 
   ipcMain.handle('dialog:saveFile', async (_event, defaultName: string) => {
-    if (!mainWindow) return null
-    const result = await dialog.showSaveDialog(mainWindow, {
+    const win = getWindow()
+    if (!win) return null
+    const result = await dialog.showSaveDialog(win, {
       defaultPath: defaultName,
       filters: [
         { name: 'Video Files', extensions: ['mp4', 'mkv'] },

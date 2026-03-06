@@ -3,6 +3,7 @@ import logging
 import re
 
 from core.ffmpeg_utils import get_ffmpeg_path
+from core.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ async def burn_subtitles(
                 if duration > 0:
                     progress = min(99, (time_s / duration) * 100)
                     last_progress = progress
+                    if task_id:
+                        task_manager.update_progress(task_id, progress)
                     if ws_manager and task_id:
                         await ws_manager.broadcast(
                             task_id, "encoding", progress,

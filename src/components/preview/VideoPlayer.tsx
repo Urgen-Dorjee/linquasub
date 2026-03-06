@@ -2,6 +2,8 @@ import { useRef, useState, useEffect, useMemo, useImperativeHandle, forwardRef }
 import { Play, Pause, Volume2, VolumeX, SkipBack, SkipForward, Eye } from 'lucide-react'
 import type { Segment } from '../../types/subtitle'
 import { useTranslationStore } from '../../stores/translationStore'
+import { useVideoEffectsStore } from '../../stores/videoEffectsStore'
+import api from '../../services/api'
 
 interface VideoPlayerProps {
   videoPath: string
@@ -44,6 +46,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const activeTrack = useTranslationStore((s) => s.activeTrack)
     const activeTranslations = activeTrack ? tracks.get(activeTrack) : null
 
+    // Video effects — real-time CSS filter preview
+    const cssFilter = useVideoEffectsStore((s) => s.getCssFilter())
+    const vignette = useVideoEffectsStore((s) => s.effects.vignette)
+
+    // Audio volume preview (EQ applied on export via FFmpeg)
+    const audioVolume = useVideoEffectsStore((s) => s.audioMix.volume)
+
     useImperativeHandle(ref, () => ({
       getVideoElement: () => videoRef.current,
     }))
@@ -61,6 +70,16 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       if (!currentSubtitle) return 0
       return calculateWPM(currentSubtitle.text, currentSubtitle.end - currentSubtitle.start)
     }, [currentSubtitle])
+
+    // Apply volume directly to video element (EQ/bass/treble applied via FFmpeg on export)
+    useEffect(() => {
+      const video = videoRef.current
+      if (video) video.volume = Math.max(0, Math.min(1, audioVolume))
+    }, [audioVolume])
+
+    const videoSrc = videoPath.startsWith('http')
+      ? videoPath
+      : `${api.baseURL}/api/serve-file?path=${encodeURIComponent(videoPath)}`
 
     useEffect(() => {
       const video = videoRef.current
@@ -90,9 +109,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }, [duration])
 
-    // Initialize wavesurfer.js
+    // Initialize wavesurfer.js — load audio independently (don't hijack video element)
     useEffect(() => {
-      if (!waveformRef.current) return
+      if (!waveformRef.current || !videoSrc) return
 
       let ws: any = null
       let destroyed = false
@@ -115,9 +134,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             normalize: true,
             interact: true,
             hideScrollbar: true,
-            backend: 'MediaElement',
-            media: videoRef.current || undefined,
           })
+
+          // Load audio from the same source but independently
+          ws.load(videoSrc)
+
+          // Mute wavesurfer — we only want the waveform visual, not duplicate audio
+          ws.setVolume(0)
 
           ws.on('click', (relativeX: number) => {
             if (videoRef.current && duration > 0) {
@@ -140,7 +163,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
         wavesurferRef.current = null
       }
-    }, [videoPath])
+    }, [videoSrc])
 
     const togglePlay = () => {
       const video = videoRef.current
@@ -189,10 +212,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
     }
 
-    const videoSrc = videoPath.startsWith('http')
-      ? videoPath
-      : `file:///${videoPath.replace(/\\/g, '/')}`
-
     const showOriginal = previewMode === 'original' || previewMode === 'dual'
     const showTranslation = previewMode === 'translation' || previewMode === 'dual'
 
@@ -206,7 +225,14 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             ref={videoRef}
             src={videoSrc}
             className="w-full h-full object-contain"
+            style={{ filter: cssFilter || undefined }}
           />
+
+          {/* Vignette overlay */}
+          {vignette && (
+            <div className="absolute inset-0 pointer-events-none"
+              style={{ background: 'radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%)' }} />
+          )}
 
           {/* Subtitle overlay */}
           {previewMode !== 'off' && currentSubtitle && (

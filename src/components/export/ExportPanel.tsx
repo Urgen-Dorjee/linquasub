@@ -365,11 +365,19 @@ export default function ExportPanel() {
         </div>
 
         {isExporting && (currentFormat === 'video' || currentFormat === 'karaoke') && (
-          <div className="w-full bg-slate-800 rounded-full h-2">
-            <div
-              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${Math.max(progress, 1)}%` }}
-            />
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">
+                {progress > 0 ? `Encoding video... ${Math.round(progress)}%` : 'Starting encoder...'}
+              </span>
+              <span className="text-blue-400 font-medium">{Math.round(progress)}%</span>
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-2.5">
+              <div
+                className="bg-blue-600 h-2.5 rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${Math.max(progress, 2)}%` }}
+              />
+            </div>
           </div>
         )}
       </div>

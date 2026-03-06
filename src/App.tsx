@@ -9,7 +9,7 @@ import { useProjectStore } from './stores/projectStore'
 import { useSettingsStore } from './stores/settingsStore'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useSessionPersistence } from './hooks/useSessionPersistence'
-import { initApi } from './services/api'
+import { initApi, setApiPort } from './services/api'
 import api from './services/api'
 import { Loader2 } from 'lucide-react'
 
@@ -37,32 +37,52 @@ export default function App() {
   useEffect(() => {
     initApi().catch(() => {})
 
-    if (window.electronAPI) {
-      const unsubReady = window.electronAPI.onBackendReady(async () => {
-        setBackendReady(true)
-        const p = await window.electronAPI!.getPythonPort()
-        setPort(p ?? 8321)
-        api.getSettings().then((data) => {
-          if (data.gemini_api_key) setGeminiApiKey(data.gemini_api_key)
-          if (data.deepl_api_key) setDeeplApiKey(data.deepl_api_key)
-          setSettingsLoaded(true)
-        }).catch(() => setSettingsLoaded(true))
-      })
-      const unsubError = window.electronAPI.onBackendError((error) => {
-        setBackendError(error)
-      })
-      return () => {
-        unsubReady()
-        unsubError()
-      }
-    } else {
-      setPort(8321)
-      setBackendReady(true)
+    const loadSettings = () => {
       api.getSettings().then((data) => {
         if (data.gemini_api_key) setGeminiApiKey(data.gemini_api_key)
         if (data.deepl_api_key) setDeeplApiKey(data.deepl_api_key)
         setSettingsLoaded(true)
       }).catch(() => setSettingsLoaded(true))
+    }
+
+    if (window.electronAPI) {
+      const unsubReady = window.electronAPI.onBackendReady(async () => {
+        setBackendReady(true)
+        const p = await window.electronAPI!.getPythonPort()
+        setPort(p ?? 8321)
+        setApiPort(p ?? 8321)
+        loadSettings()
+      })
+      const unsubError = window.electronAPI.onBackendError((error) => {
+        setBackendError(error)
+      })
+
+      // Dev mode fallback: if backend doesn't signal ready within 3s,
+      // try common dev ports directly
+      const devFallback = setTimeout(async () => {
+        if (useProjectStore.getState().backendReady) return
+        const devPorts = [8000, 8321]
+        for (const p of devPorts) {
+          try {
+            await fetch(`http://127.0.0.1:${p}/api/health`)
+            setPort(p)
+            setApiPort(p)
+            setBackendReady(true)
+            loadSettings()
+            return
+          } catch { /* try next port */ }
+        }
+      }, 3000)
+
+      return () => {
+        unsubReady()
+        unsubError()
+        clearTimeout(devFallback)
+      }
+    } else {
+      setPort(8321)
+      setBackendReady(true)
+      loadSettings()
     }
   }, [setBackendReady, setBackendError])
 

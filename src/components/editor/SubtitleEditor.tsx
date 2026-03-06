@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useTranscriptionStore } from '../../stores/transcriptionStore'
+import { useTranslationStore } from '../../stores/translationStore'
 import SubtitleRow from './SubtitleRow'
 import TimingTools from './TimingTools'
 import { Merge, Trash2, Upload, Undo2, Redo2 } from 'lucide-react'
@@ -54,22 +55,35 @@ export default function SubtitleEditor() {
   }
 
   const handleImportSubtitle = async () => {
-    if (!window.electronAPI) return
+    let path: string | null = null
+
+    if (window.electronAPI) {
+      path = await window.electronAPI.selectSubtitleFile()
+    } else {
+      path = prompt('Enter subtitle file path (.srt, .vtt, .ass):')
+    }
+
+    if (!path) return
 
     try {
-      const path = await window.electronAPI.selectSubtitleFile()
-      if (!path) return
-
       const ext = path.split('.').pop()?.toLowerCase()
       if (!['srt', 'vtt', 'ass', 'ssa'].includes(ext || '')) {
         toast.error('Unsupported subtitle format. Use SRT, VTT, or ASS.')
         return
       }
 
-      const result = await api.importSubtitle(path)
+      // First try with dual-language splitting
+      const result = await api.importSubtitle(path, true)
       if (result.segments && result.segments.length > 0) {
         setSegments(result.segments)
-        toast.success(`Imported ${result.count} segments from ${ext?.toUpperCase()}`)
+
+        // If dual-language translations were extracted, load them into the translation store
+        if (result.translations && result.translations.length > 0) {
+          useTranslationStore.getState().setTranslations(result.translations, 'EN')
+          toast.success(`Imported ${result.count} segments with translations from ${ext?.toUpperCase()}`)
+        } else {
+          toast.success(`Imported ${result.count} segments from ${ext?.toUpperCase()}`)
+        }
       } else {
         toast.error('No segments found in file')
       }

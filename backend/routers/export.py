@@ -105,7 +105,24 @@ async def import_subtitle(request: SubtitleImportRequest):
     """Import an existing subtitle file (SRT/VTT/ASS) and return parsed segments."""
     try:
         segments = await import_subtitle_file(request.file_path)
-        return {"segments": segments, "count": len(segments)}
+
+        translations = []
+        if request.split_dual_language:
+            for seg in segments:
+                lines = seg["text"].split("\n")
+                if len(lines) >= 2:
+                    # First line = original, second line = translation
+                    seg["text"] = lines[0].strip()
+                    translations.append({
+                        "id": seg["id"],
+                        "originalText": lines[0].strip(),
+                        "translatedText": "\n".join(lines[1:]).strip(),
+                    })
+
+        result = {"segments": segments, "count": len(segments)}
+        if translations:
+            result["translations"] = translations
+        return result
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
     except ValueError as e:

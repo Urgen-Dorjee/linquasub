@@ -31,7 +31,9 @@ async def download_video(
         pass
 
     # Progress hook that sends updates via WebSocket
+    # yt-dlp downloads video+audio separately, so we track streams to avoid progress regression
     downloaded_path = {"path": ""}
+    stream_state = {"stream_index": 0, "max_progress": 0.0}
     loop = asyncio.get_event_loop()
 
     def progress_hook(d):
@@ -39,23 +41,35 @@ async def download_video(
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded = d.get("downloaded_bytes", 0)
             if total > 0:
-                pct = (downloaded / total) * 100
+                stream_pct = (downloaded / total) * 100
+                # Map to overall progress: stream 0 = 0-50%, stream 1 = 50-95%
+                if stream_state["stream_index"] == 0:
+                    pct = stream_pct * 0.5
+                else:
+                    pct = 50 + stream_pct * 0.45
+                # Never go backwards
+                pct = max(pct, stream_state["max_progress"])
+                stream_state["max_progress"] = pct
                 if ws_manager and task_id:
                     asyncio.run_coroutine_threadsafe(
                         ws_manager.broadcast(
                             task_id,
                             "download",
                             pct,
-                            message=f"Downloading: {pct:.1f}%",
+                            message=f"Downloading: {pct:.0f}%",
                         ),
                         loop,
                     )
         elif d["status"] == "finished":
             downloaded_path["path"] = d.get("filename", "")
+            stream_state["stream_index"] += 1
             if ws_manager and task_id:
+                pct = 50 if stream_state["stream_index"] == 1 else 95
+                stream_state["max_progress"] = max(pct, stream_state["max_progress"])
                 asyncio.run_coroutine_threadsafe(
                     ws_manager.broadcast(
-                        task_id, "download", 100, message="Download complete, merging..."
+                        task_id, "download", stream_state["max_progress"],
+                        message="Merging audio & video..." if stream_state["stream_index"] >= 2 else "Downloading audio...",
                     ),
                     loop,
                 )

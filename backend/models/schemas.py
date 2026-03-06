@@ -101,6 +101,7 @@ class SubtitleStyle(BaseModel):
 
 class SubtitleImportRequest(BaseModel):
     file_path: str
+    split_dual_language: bool = False
 
 
 class TimingShiftRequest(BaseModel):

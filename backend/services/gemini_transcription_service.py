@@ -110,6 +110,67 @@ async def _call_with_retry(func, loop, max_retries=MAX_RETRIES,
             raise
 
 
+async def _split_audio_chunks(video_path: str, chunk_minutes: int = 10) -> list[str]:
+    """Split a video's audio into chunks for long video transcription.
+
+    Returns a list of audio file paths. Each chunk is `chunk_minutes` long.
+    """
+    ffmpeg_path = get_ffmpeg_path()
+
+    # Get duration
+    cmd = [
+        ffmpeg_path.replace("ffmpeg", "ffprobe"),
+        "-v", "quiet", "-print_format", "json", "-show_format", video_path,
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate()
+    import json as _json
+    duration = float(_json.loads(stdout.decode()).get("format", {}).get("duration", 0))
+
+    if duration <= 0:
+        raise RuntimeError("Could not determine video duration")
+
+    chunk_seconds = chunk_minutes * 60
+    num_chunks = max(1, int(duration / chunk_seconds) + (1 if duration % chunk_seconds > 0 else 0))
+
+    if num_chunks == 1:
+        # Short video — just extract full audio
+        path = await _extract_audio(video_path)
+        return [path]
+
+    logger.info("Splitting %d-second video into %d chunks of %d minutes each",
+                int(duration), num_chunks, chunk_minutes)
+
+    chunks = []
+    for i in range(num_chunks):
+        start = i * chunk_seconds
+        fd, chunk_path = tempfile.mkstemp(suffix=f"_chunk{i}.mp3")
+        os.close(fd)
+
+        cmd = [
+            ffmpeg_path,
+            "-i", video_path,
+            "-ss", str(start),
+            "-t", str(chunk_seconds),
+            "-vn", "-acodec", "libmp3lame",
+            "-ab", "128k", "-ar", "22050", "-ac", "1",
+            "-y", chunk_path,
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.warning("Failed to extract chunk %d: %s", i, stderr.decode()[:200])
+            continue
+        if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
+            chunks.append(chunk_path)
+
+    return chunks
+
+
 async def _extract_audio(video_path: str) -> str:
     """Extract audio from video as high-quality MP3 for Gemini.
 
@@ -210,67 +271,31 @@ async def transcribe_audio_gemini(
     logger.info("Using Gemini model: %s", model_name)
     model = genai.GenerativeModel(model_name)
 
-    # Phase 1: Upload video file to Gemini (gives it visual + audio context)
-    logger.info("Phase 1: Uploading video to Gemini...")
+    # Phase 1: Split audio into chunks for long videos
+    logger.info("Phase 1: Preparing audio...")
     if progress_callback:
         progress_callback(5)
     if ws_manager and task_id:
         await ws_manager.broadcast(
             task_id, "transcription", 5,
-            phase="uploading",
-            message="Uploading video to Gemini AI...",
+            phase="preparing",
+            message="Preparing audio for transcription...",
         )
 
     loop = asyncio.get_event_loop()
     uploaded_file = None
+    audio_chunks = []
 
     try:
-        # Upload the video file — Gemini gets BOTH video and audio
-        # This matches what the Gemini portal does and gives best accuracy
-        def do_upload():
-            return genai.upload_file(video_path)
+        audio_chunks = await _split_audio_chunks(video_path, chunk_minutes=10)
+        num_chunks = len(audio_chunks)
+        is_chunked = num_chunks > 1
+        logger.info("Audio prepared: %d chunk(s)", num_chunks)
 
-        uploaded_file = await _call_with_retry(
-            do_upload, loop, task_id=task_id, ws_manager=ws_manager,
-            phase_msg="uploading video", current_progress=5,
-        )
-        logger.info("Video uploaded: %s (name=%s)", uploaded_file.display_name, uploaded_file.name)
-
-        # Wait for file to be processed
-        import time as _time
-        def wait_for_processing():
-            f = uploaded_file
-            while f.state.name == "PROCESSING":
-                _time.sleep(2)
-                f = genai.get_file(f.name)
-            if f.state.name == "FAILED":
-                raise RuntimeError(f"Gemini file processing failed: {f.state.name}")
-            return f
-
-        if progress_callback:
-            progress_callback(10)
-        if ws_manager and task_id:
-            await ws_manager.broadcast(
-                task_id, "transcription", 10,
-                phase="processing",
-                message="Gemini is processing the video...",
-            )
-
-        uploaded_file = await loop.run_in_executor(None, wait_for_processing)
-        logger.info("Video processing complete, state: %s", uploaded_file.state.name)
-
-        if cancel_check and cancel_check():
-            raise Exception("Transcription cancelled by user")
-
-        # Phase 3: Transcribe with Gemini
-        if progress_callback:
-            progress_callback(20)
-        if ws_manager and task_id:
-            await ws_manager.broadcast(
-                task_id, "transcription", 20,
-                phase="transcribing",
-                message="Sending video to Gemini AI for transcription...",
-            )
+        all_segments = []
+        all_translations = []
+        detected_language = "unknown"
+        time_offset = 0.0
 
         lang_name = LANGUAGE_NAMES.get(language)
         if lang_name:
@@ -278,169 +303,180 @@ async def transcribe_audio_gemini(
         else:
             lang_hint = "Auto-detect the spoken language."
 
-        # Determine target language name for combined mode
         target_lang_name = LANGUAGE_NAMES.get(target_lang, target_lang) if target_lang else ""
         combined_mode = bool(target_lang_name)
+        output_tokens = 131072 if combined_mode else 65536
 
-        if combined_mode:
-            prompt = f"""Listen carefully to this audio and produce both an accurate transcription and a natural {target_lang_name} translation.
+        # Process each chunk
+        for chunk_idx, chunk_path in enumerate(audio_chunks):
+            if cancel_check and cancel_check():
+                raise Exception("Transcription cancelled by user")
+
+            chunk_label = f"chunk {chunk_idx + 1}/{num_chunks}" if is_chunked else "audio"
+            # Progress range for this chunk: spread evenly across 10%-90%
+            chunk_progress_start = 10 + (80 * chunk_idx / num_chunks)
+            chunk_progress_end = 10 + (80 * (chunk_idx + 1) / num_chunks)
+
+            # Upload chunk
+            if ws_manager and task_id:
+                await ws_manager.broadcast(
+                    task_id, "transcription", round(chunk_progress_start),
+                    phase="uploading",
+                    message=f"Uploading {chunk_label} to Gemini AI...",
+                )
+
+            def do_upload(path=chunk_path):
+                return genai.upload_file(path)
+
+            uploaded_file = await _call_with_retry(
+                do_upload, loop, task_id=task_id, ws_manager=ws_manager,
+                current_progress=round(chunk_progress_start),
+            )
+
+            # Wait for processing
+            import time as _time
+            def wait_for_processing(f=uploaded_file):
+                while f.state.name == "PROCESSING":
+                    _time.sleep(2)
+                    f = genai.get_file(f.name)
+                if f.state.name == "FAILED":
+                    raise RuntimeError(f"Gemini file processing failed: {f.state.name}")
+                return f
+
+            uploaded_file = await loop.run_in_executor(None, wait_for_processing)
+
+            # Build prompt
+            if combined_mode:
+                prompt = f"""Listen carefully to this audio and produce both an accurate transcription and a natural {target_lang_name} translation.
 
 {lang_hint}
+{"This is " + chunk_label + " of a longer recording. Timestamps should start from 0 for this chunk." if is_chunked else ""}
 
-STEP 1 — LISTEN AND UNDERSTAND:
-First, listen to the entire audio carefully to understand the full context, meaning, topic, and tone of the speech. Pay attention to proper nouns, numbers, dates, honorific titles, and cultural references.
-
-STEP 2 — TRANSCRIBE:
-Transcribe every word spoken in the original language using its native script. Be precise — capture the exact words spoken, including:
-- Proper nouns and names (people, places, organizations)
-- Numbers and dates in their spoken form
-- Honorific and formal language
-- Religious, cultural, or technical terminology
-
-STEP 3 — TRANSLATE:
-Translate each segment into natural, fluent {target_lang_name}. The translation should:
-- Convey the MEANING, not be a word-by-word literal translation
-- Sound natural to a native {target_lang_name} speaker
-- Preserve the tone (formal, informal, devotional, etc.)
-- Translate proper nouns, titles, and cultural terms appropriately for the target audience
-- Keep translations concise for subtitle display
+STEP 1: Listen to the entire audio carefully to understand the full context.
+STEP 2: Transcribe every word in the original language using its native script.
+STEP 3: Translate each segment into natural, fluent {target_lang_name}.
 
 OUTPUT FORMAT — return ONLY this JSON (no markdown, no code fences):
 {{
   "detected_language": "language name",
   "segments": [
-    {{"id": "seg_0000", "start": 0.0, "end": 3.5, "text": "original transcription", "translated_text": "{target_lang_name} translation"}},
-    {{"id": "seg_0001", "start": 3.8, "end": 7.2, "text": "original transcription", "translated_text": "{target_lang_name} translation"}}
+    {{"id": "seg_0000", "start": 0.0, "end": 3.5, "text": "original transcription", "translated_text": "{target_lang_name} translation"}}
   ]
 }}
 
 RULES:
 - "text" = exact original language transcription in native script
 - "translated_text" = natural {target_lang_name} translation
-- Segment IDs: sequential seg_0000, seg_0001, seg_0002, etc.
-- Timestamps in seconds with decimal precision
+- Segment IDs: sequential seg_0000, seg_0001, etc.
+- Timestamps in seconds with decimal precision (relative to this audio clip)
 - Segments should be 3-12 seconds, aligned to natural sentence/phrase boundaries
 - Include ALL speech — do not skip any part
 - Return ONLY the JSON object"""
-        else:
-            prompt = f"""Listen carefully to this audio and produce an accurate, complete transcription.
+            else:
+                prompt = f"""Listen carefully to this audio and produce an accurate, complete transcription.
 
 {lang_hint}
+{"This is " + chunk_label + " of a longer recording. Timestamps should start from 0 for this chunk." if is_chunked else ""}
 
 INSTRUCTIONS:
-1. Listen to the entire audio carefully to understand the context, topic, and content
-2. Transcribe every word in the ORIGINAL language using its native script (e.g., Tibetan script for Tibetan, Devanagari for Hindi, Chinese characters for Chinese, etc.)
-3. Be precise with the transcription — capture the exact words spoken, including:
-   - Proper nouns and names (people, places, organizations)
-   - Numbers and dates in their spoken form
-   - Honorific and formal language
-   - Religious, cultural, or technical terminology
-4. Do NOT translate — output only the original spoken language
-5. Segment the speech into natural sentences or phrases suitable for subtitles
+1. Transcribe every word in the ORIGINAL language using its native script
+2. Be precise — capture proper nouns, numbers, honorifics, and terminology
+3. Do NOT translate — output only the original spoken language
 
 OUTPUT FORMAT — return ONLY this JSON (no markdown, no code fences):
 {{
   "detected_language": "language name",
   "segments": [
-    {{"id": "seg_0000", "start": 0.0, "end": 3.5, "text": "transcribed text here"}},
-    {{"id": "seg_0001", "start": 3.8, "end": 7.2, "text": "next segment text"}}
+    {{"id": "seg_0000", "start": 0.0, "end": 3.5, "text": "transcribed text here"}}
   ]
 }}
 
 RULES:
-- Segment IDs: sequential seg_0000, seg_0001, seg_0002, etc.
-- Timestamps in seconds with decimal precision
+- Timestamps in seconds with decimal precision (relative to this audio clip)
 - Segments should be 3-12 seconds, aligned to natural sentence/phrase boundaries
 - Include ALL speech — do not skip any part
-- Use proper punctuation for the language
 - Return ONLY the JSON object"""
 
-        # Combined mode needs more output tokens (original + translations)
-        output_tokens = 131072 if combined_mode else 65536
+            # Transcribe with heartbeat
+            heartbeat_active = True
 
-        def do_transcribe():
-            logger.info("Sending transcription request to Gemini (max_tokens=%d)...", output_tokens)
-            response = model.generate_content(
-                [uploaded_file, prompt],
-                generation_config=genai.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=output_tokens,
-                ),
-                request_options={"timeout": 300},
-            )
-            logger.info("Gemini response received. Length: %d chars",
-                        len(response.text) if response.text else 0)
-            return response.text
+            async def _heartbeat(start_pct=chunk_progress_start, end_pct=chunk_progress_end):
+                elapsed = 0
+                while heartbeat_active:
+                    await asyncio.sleep(3)
+                    if not heartbeat_active:
+                        break
+                    elapsed += 3
+                    import math
+                    frac = 1 - math.exp(-elapsed / 120)
+                    pct = start_pct + (end_pct - start_pct) * frac
+                    if ws_manager and task_id:
+                        msg = f"Gemini is transcribing {chunk_label}... ({elapsed}s elapsed)"
+                        await ws_manager.broadcast(
+                            task_id, "transcription", round(pct, 1),
+                            phase="transcribing", message=msg,
+                        )
 
-        # Run the single Gemini call with a heartbeat so UI shows progress
-        heartbeat_active = True
+            def do_transcribe(f=uploaded_file):
+                response = model.generate_content(
+                    [f, prompt],
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.1, max_output_tokens=output_tokens,
+                    ),
+                    request_options={"timeout": 600},
+                )
+                return response.text
 
-        async def _heartbeat():
-            elapsed = 0
-            while heartbeat_active:
-                await asyncio.sleep(3)
-                if not heartbeat_active:
-                    break
-                elapsed += 3
-                # Logarithmic progress: approaches 95% but never caps early
-                # At 30s: ~55%, 60s: ~70%, 120s: ~82%, 180s: ~88%, 300s: ~93%
-                import math
-                pct = min(95, 20 + 75 * (1 - math.exp(-elapsed / 120)))
-                minutes = elapsed // 60
-                secs = elapsed % 60
-                if minutes > 0:
-                    time_str = f"{minutes}m {secs}s"
-                else:
-                    time_str = f"{secs}s"
-                if combined_mode:
-                    msg = f"Gemini is transcribing & translating... ({time_str} elapsed)"
-                else:
-                    msg = f"Gemini is transcribing... ({time_str} elapsed)"
-                if progress_callback:
-                    progress_callback(round(pct, 1))
-                if ws_manager and task_id:
-                    await ws_manager.broadcast(
-                        task_id, "transcription", round(pct, 1),
-                        phase="transcribing",
-                        message=msg,
-                    )
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            try:
+                response_text = await asyncio.wait_for(
+                    _call_with_retry(
+                        do_transcribe, loop, task_id=task_id, ws_manager=ws_manager,
+                        current_progress=round(chunk_progress_start),
+                    ),
+                    timeout=600,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Chunk %d timed out, skipping...", chunk_idx)
+                continue
+            finally:
+                heartbeat_active = False
+                heartbeat_task.cancel()
 
-        heartbeat_task = asyncio.create_task(_heartbeat())
-        try:
-            response_text = await asyncio.wait_for(
-                _call_with_retry(
-                    do_transcribe, loop, task_id=task_id, ws_manager=ws_manager,
-                    current_progress=20,
-                ),
-                timeout=600,  # 10 min overall timeout (includes retries)
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                "Transcription timed out after 10 minutes. "
-                "The video may be too long for Gemini's free tier, or the API is overloaded. "
-                "Try again later or use the Whisper engine instead."
-            )
-        finally:
-            heartbeat_active = False
-            heartbeat_task.cancel()
+            # Clean up uploaded file
+            try:
+                genai.delete_file(uploaded_file.name)
+            except Exception:
+                pass
+            uploaded_file = None
 
-        logger.info("Transcription done. Response (first 200 chars): %s",
-                     response_text[:200] if response_text else "EMPTY")
+            # Parse chunk result
+            chunk_result = _parse_transcription_response(response_text)
+            detected_language = chunk_result.get("detected_language", detected_language)
 
-        if cancel_check and cancel_check():
-            raise Exception("Transcription cancelled by user")
+            # Offset timestamps for chunked mode
+            for seg in chunk_result.get("segments", []):
+                seg["start"] = round(seg["start"] + time_offset, 3)
+                seg["end"] = round(seg["end"] + time_offset, 3)
+                seg["id"] = f"seg_{len(all_segments):04d}"
+                all_segments.append(seg)
 
-        # Phase 4: Parse response
-        if progress_callback:
-            progress_callback(90)
-        if ws_manager and task_id:
-            await ws_manager.broadcast(
-                task_id, "transcription", 90,
-                phase="parsing",
-                message="Processing transcription results...",
-            )
+            for t in chunk_result.get("translations", []):
+                t["id"] = f"seg_{len(all_translations):04d}"
+                all_translations.append(t)
 
-        result = _parse_transcription_response(response_text)
+            if is_chunked:
+                time_offset += 10 * 60  # 10 minutes per chunk
+
+            logger.info("Chunk %d: %d segments extracted", chunk_idx, len(chunk_result.get("segments", [])))
+
+        # Build final result
+        result = {
+            "detected_language": detected_language,
+            "segments": all_segments,
+        }
+        if all_translations:
+            result["translations"] = all_translations
 
         if progress_callback:
             progress_callback(100)
@@ -448,7 +484,7 @@ RULES:
             await ws_manager.broadcast(
                 task_id, "transcription", 100,
                 phase="complete",
-                message=f"Transcription complete: {len(result['segments'])} segments",
+                message=f"Transcription complete: {len(all_segments)} segments",
             )
 
         return result
@@ -459,6 +495,13 @@ RULES:
             try:
                 genai.delete_file(uploaded_file.name)
                 logger.info("Cleaned up uploaded file: %s", uploaded_file.name)
+            except Exception:
+                pass
+        # Clean up audio chunk files
+        for chunk_path in audio_chunks:
+            try:
+                if os.path.exists(chunk_path):
+                    os.unlink(chunk_path)
             except Exception:
                 pass
 

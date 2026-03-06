@@ -8,8 +8,6 @@ import { motion } from 'framer-motion'
 
 export default function HomePage() {
   const videoPath = useProjectStore((s) => s.videoPath)
-  const isVideoLoading = useProjectStore((s) => s.isVideoLoading)
-  const downloadProgress = useProjectStore((s) => s.downloadProgress)
   const backendReady = useProjectStore((s) => s.backendReady)
   const backendError = useProjectStore((s) => s.backendError)
   const segments = useTranscriptionStore((s) => s.segments)
@@ -19,7 +17,7 @@ export default function HomePage() {
 
   if (backendError) {
     return (
-      <div className="max-w-4xl mx-auto flex items-center justify-center h-full">
+      <div className="w-full px-6 flex items-center justify-center h-full">
         <div className="text-center space-y-3">
           <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mx-auto">
             <span className="text-red-400 text-xl">!</span>
@@ -33,7 +31,7 @@ export default function HomePage() {
 
   if (!backendReady) {
     return (
-      <div className="max-w-4xl mx-auto flex items-center justify-center h-full">
+      <div className="w-full px-6 flex items-center justify-center h-full">
         <div className="text-center space-y-3">
           <Loader2 className="animate-spin text-blue-400 mx-auto" size={32} />
           <p className="text-slate-400">Starting backend...</p>
@@ -43,7 +41,7 @@ export default function HomePage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="w-full px-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-white mb-2">Get Started</h2>
         <p className="text-slate-400">
@@ -52,19 +50,6 @@ export default function HomePage() {
       </div>
 
       <InputPanel />
-
-      {/* Download progress */}
-      {isVideoLoading && downloadProgress > 0 && (
-        <div className="card">
-          <div className="flex items-center gap-3 mb-2">
-            <Loader2 className="animate-spin text-blue-400" size={16} />
-            <span className="text-sm text-slate-300">Downloading video... {Math.round(downloadProgress)}%</span>
-          </div>
-          <div className="w-full bg-slate-800 rounded-full h-1.5">
-            <div className="bg-blue-600 h-1.5 rounded-full transition-all" style={{ width: `${downloadProgress}%` }} />
-          </div>
-        </div>
-      )}
 
       {videoPath && (
         <div className="space-y-4 animate-fade-in">
@@ -108,7 +93,7 @@ export default function HomePage() {
         </motion.div>
       )}
 
-      {!videoPath && !isVideoLoading && (
+      {!videoPath && (
         <div className="card border-dashed border-slate-700 flex items-center gap-4 text-slate-500">
           <Video size={24} />
           <div>

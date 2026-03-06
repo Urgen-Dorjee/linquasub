@@ -56,7 +56,7 @@ export default function SettingsPage() {
   }, [deeplApiKey, geminiApiKey, geminiModel, settingsLoaded])
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="w-full px-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-white mb-2">Settings</h2>
         <p className="text-slate-400">Configure your LinguaSub preferences.</p>

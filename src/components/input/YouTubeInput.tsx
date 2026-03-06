@@ -15,10 +15,18 @@ export default function YouTubeInput() {
   const isValidUrl = YOUTUBE_REGEX.test(url)
 
   const handleSelectFolder = async () => {
-    if (!window.electronAPI) return
-    const dir = await window.electronAPI.selectOutputDir()
-    if (dir) {
-      setOutputDir(dir)
+    try {
+      if (window.electronAPI) {
+        const dir = await window.electronAPI.selectOutputDir()
+        if (dir) setOutputDir(dir)
+      } else {
+        // Fallback: prompt user to type a path
+        const dir = prompt('Enter the folder path to save downloads:')
+        if (dir) setOutputDir(dir)
+      }
+    } catch (err) {
+      console.error('Failed to select folder:', err)
+      toast.error('Could not open folder picker')
     }
   }
 

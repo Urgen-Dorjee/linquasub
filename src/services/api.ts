@@ -3,10 +3,14 @@ import type { HealthResponse } from '../types/api'
 
 let baseURL = 'http://127.0.0.1:8321'
 
+export function setApiPort(port: number) {
+  baseURL = `http://127.0.0.1:${port}`
+}
+
 export async function initApi() {
   if (window.electronAPI) {
     const port = await window.electronAPI.getPythonPort()
-    baseURL = `http://127.0.0.1:${port}`
+    setApiPort(port)
   }
 }
 
@@ -142,8 +146,11 @@ const api = {
     return res.data
   },
 
-  async importSubtitle(filePath: string) {
-    const res = await axios.post(`${baseURL}/api/import/subtitle`, { file_path: filePath })
+  async importSubtitle(filePath: string, splitDualLanguage = false) {
+    const res = await axios.post(`${baseURL}/api/import/subtitle`, {
+      file_path: filePath,
+      split_dual_language: splitDualLanguage,
+    })
     return res.data
   },
 

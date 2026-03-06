@@ -44,12 +44,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
         words = seg.get("words", [])
 
         if not words:
-            # No word-level timestamps, fall back to regular subtitle
+            # No word-level timestamps — generate approximate karaoke from even distribution
             text = seg.get("text", "")
-            lines.append(
-                f"Dialogue: 0,{_format_ass_time(start_time)},{_format_ass_time(end_time)},Default,,0,0,0,,{text}"
-            )
-            continue
+            text_words = text.strip().split()
+            if not text_words:
+                lines.append(
+                    f"Dialogue: 0,{_format_ass_time(start_time)},{_format_ass_time(end_time)},Default,,0,0,0,,{text}"
+                )
+                continue
+            seg_duration = end_time - start_time
+            word_dur = seg_duration / len(text_words)
+            words = []
+            for i, w in enumerate(text_words):
+                words.append({
+                    "word": w,
+                    "start": start_time + i * word_dur,
+                    "end": start_time + (i + 1) * word_dur,
+                })
 
         # Build karaoke text with \kf tags
         # \kf = smooth fill effect (duration in centiseconds)
